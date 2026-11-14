@@ -14,7 +14,10 @@ VALID_DEPENDENCY_KINDS = ("hard", "soft")
 # current orchestration (disabled job, unknown name, or not reached yet).
 UPSTREAM_NOT_RUN = "not_run"
 UPSTREAM_SUCCESS = "success"
-_UPSTREAM_OK = {UPSTREAM_SUCCESS, "degraded", "blocked", "failed"}
+# An upstream counts as ready only when it completed this run: clean success or
+# degraded execution. Failed, hard-skipped ("blocked") and never-run upstreams
+# are not usable and gate their downstreams.
+_UPSTREAM_OK = {UPSTREAM_SUCCESS, "degraded"}
 
 
 def normalize_dependency(raw: Any) -> dict[str, str]:
@@ -36,8 +39,8 @@ def normalize_dependency(raw: Any) -> dict[str, str]:
 def normalize_dependencies(raw: Iterable[Any] | None) -> list[dict[str, str]]:
     """Normalize a stored ``depends_on_json`` payload, collapsing duplicates.
 
-    If the same upstream is declared both hard and soft, soft wins so the edge
-    stays runnable when the upstream is incomplete.
+    If the same upstream is declared both hard and soft, hard wins so the
+    stricter gate applies when the upstream is incomplete.
     """
     if raw is None:
         return []
@@ -49,8 +52,8 @@ def normalize_dependencies(raw: Iterable[Any] | None) -> list[dict[str, str]]:
         edge = normalize_dependency(item)
         existing = by_name.get(edge["name"])
         if existing is not None:
-            if edge["kind"] == "soft":
-                existing["kind"] = "soft"
+            if edge["kind"] == "hard":
+                existing["kind"] = "hard"
             continue
         by_name[edge["name"]] = edge
         edges.append(edge)
@@ -96,15 +99,15 @@ def evaluate_dependencies(
         names = ", ".join(
             f"{item['name']} ({item['upstream_status']})" for item in blocking
         )
-        # Hard gaps stay visible in the verdict, but the job remains runnable so
+        # Hard gaps forbid execution: the job must be hard-skipped, never run.
         return {
-            "ready": True,
+            "ready": False,
             "hard_blocked": True,
             "degraded_mode": False,
             "blocking": blocking,
             "soft_missing": degraded,
             "reason": f"hard dependency not satisfied: {names}",
-            "allow_execute": True,
+            "allow_execute": False,
         }
 
     if degraded:
@@ -139,8 +142,6 @@ def ready_by_upstream_success(
     """Legacy helper kept for callers/tests: treat every edge as hard."""
     states = {name: UPSTREAM_SUCCESS for name in success_job_names}
     verdict = evaluate_dependencies(depends_on, states)
-    if verdict["hard_blocked"]:
-        return True, str(verdict["reason"])
     return bool(verdict["ready"]), str(verdict["reason"])
 
 

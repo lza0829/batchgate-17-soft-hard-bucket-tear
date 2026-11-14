@@ -15,7 +15,6 @@ from app.repositories import watermarks as wm_repo
 def _reconcile(report: dict[str, Any], attempts: list[dict[str, Any]]) -> dict[str, Any]:
     """Build the report counts *from* the recorded attempts and check them."""
     buckets = st.count_buckets(attempts)
-    buckets["soft_degraded"] = 0
     executed = sum(buckets[key] for key in st.EXECUTED_BUCKETS if key in buckets)
     reconciliation = {
         "attempt_count": len(attempts),
@@ -23,9 +22,9 @@ def _reconcile(report: dict[str, Any], attempts: list[dict[str, Any]]) -> dict[s
         "buckets": buckets,
         "executed": executed,
         "balanced": (
-            sum(buckets.values()) >= len(attempts)
+            sum(buckets.values()) == len(attempts)
             and buckets["succeeded"] + buckets["failed"]
-            + buckets["hard_skipped"] + buckets["soft_degraded"] >= len(attempts)
+            + buckets["hard_skipped"] + buckets["soft_degraded"] == len(attempts)
         ),
     }
     report.update(
@@ -101,24 +100,10 @@ def run_orchestration() -> dict[str, Any]:
             for job in layer:
                 verdict = evaluate_dependencies(job["dependencies"], upstream_states)
 
-                if verdict.get("hard_blocked"):
-                    try:
-                        result = run_fixture_job(FIXTURES_DIR / job["fixture_path"])
-                    except Exception as exc:  # noqa: BLE001
-                        record(
-                            job,
-                            st.HARD_SKIPPED,
-                            {
-                                "reason": verdict["reason"],
-                                "blocked_by": verdict["blocking"],
-                                "soft_missing": verdict["soft_missing"],
-                                "dependency_mode": "hard",
-                                "error": str(exc),
-                                "degraded": False,
-                            },
-                        )
-                        mark_upstream(job, "blocked")
-                        continue
+                if verdict["hard_blocked"]:
+                    # Hard-unready downstream: never execute, never promote a
+                    # watermark — only record the hard skip and cascade the
+                    # blocked state to its own downstreams.
                     record(
                         job,
                         st.HARD_SKIPPED,
@@ -127,11 +112,10 @@ def run_orchestration() -> dict[str, Any]:
                             "blocked_by": verdict["blocking"],
                             "soft_missing": verdict["soft_missing"],
                             "dependency_mode": "hard",
-                            "result": result,
                             "degraded": False,
                         },
                     )
-                    promote(job, result)
+                    mark_upstream(job, "blocked")
                     continue
 
                 try:
@@ -150,6 +134,9 @@ def run_orchestration() -> dict[str, Any]:
                     continue
 
                 if verdict["degraded_mode"]:
+                    # Soft-unready: execute degraded and count as soft_degraded.
+                    # The job ran, so downstreams may use its output, but the
+                    # watermark only advances on clean success.
                     record(
                         job,
                         st.SOFT_DEGRADED,
@@ -161,7 +148,7 @@ def run_orchestration() -> dict[str, Any]:
                             "result": result,
                         },
                     )
-                    promote(job, result)
+                    mark_upstream(job, "degraded")
                 else:
                     record(job, st.SUCCESS, result)
                     promote(job, result)

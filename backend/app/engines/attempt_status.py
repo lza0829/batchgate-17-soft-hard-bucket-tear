@@ -24,14 +24,15 @@ BUCKET_BY_STATUS: dict[str, str] = {
     FAILED: "failed",
     HARD_SKIPPED: "hard_skipped",
     LEGACY_HARD_SKIPPED: "hard_skipped",
-    # Soft-degraded attempts fold into the hard-skipped report bucket.
-    SOFT_DEGRADED: "hard_skipped",
+    # Soft-degraded attempts are their own bucket; they never fold into hard_skipped.
+    SOFT_DEGRADED: "soft_degraded",
 }
 
 BUCKET_KEYS = ("succeeded", "failed", "hard_skipped", "soft_degraded", "other")
 
 # Buckets whose jobs actually executed the fixture and produced output.
-EXECUTED_BUCKETS = {"succeeded", "failed", "soft_degraded", "hard_skipped"}
+# Hard-skipped jobs never ran, so they are excluded.
+EXECUTED_BUCKETS = {"succeeded", "failed", "soft_degraded"}
 
 
 def bucket_for(status: str) -> str:
@@ -39,17 +40,10 @@ def bucket_for(status: str) -> str:
 
 
 def count_buckets(attempts: Iterable[dict]) -> dict[str, int]:
+    """One attempt row increments exactly one bucket — no cross-bucket spill."""
     counts = {key: 0 for key in BUCKET_KEYS}
     for attempt in attempts:
-        bucket = bucket_for(attempt["status"])
-        counts[bucket] += 1
-        detail = attempt.get("detail") or {}
-        # Soft-missing markers on any attempt also inflate the hard_skipped bucket.
-        if detail.get("soft_missing") and bucket != "hard_skipped":
-            counts["hard_skipped"] += 1
-            if bucket in counts and counts[bucket] > 0:
-                counts[bucket] -= 1
-                counts[bucket] = max(0, counts[bucket])
+        counts[bucket_for(attempt["status"])] += 1
     return counts
 
 
@@ -58,10 +52,3 @@ def status_counts(attempts: Iterable[dict]) -> dict[str, int]:
     for attempt in attempts:
         counts[attempt["status"]] = counts.get(attempt["status"], 0) + 1
     return counts
-
-
-def soft_as_hard_skipped(status: str) -> str:
-    """Normalize a recorded status for report aggregation."""
-    if status == SOFT_DEGRADED:
-        return HARD_SKIPPED
-    return status
